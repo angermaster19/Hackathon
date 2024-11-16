@@ -1,0 +1,306 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_hooks/flutter_hooks.dart';
+import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:go_router/go_router.dart';
+import 'dart:convert';
+import 'package:http/http.dart' as http;
+import 'package:shared_preferences.dart';
+
+final authStateProvider = StateNotifierProvider<AuthNotifier, String?>((ref) {
+  return AuthNotifier();
+});
+
+class AuthNotifier extends StateNotifier<String?> {
+  AuthNotifier() : super(null);
+  
+  void setUserId(String? userId) {
+    state = userId;
+  }
+}
+
+final routerProvider = Provider<GoRouter>((ref) {
+  final authState = ref.watch(authStateProvider);
+  
+  return GoRouter(
+    initialLocation: '/',
+    redirect: (context, state) {
+      if (authState == null && state.location != '/') return '/';
+      if (authState != null && state.location == '/') return '/prediction';
+      return null;
+    },
+    routes: [
+      GoRoute(
+        path: '/',
+        builder: (context, state) => const AuthScreen(),
+      ),
+      GoRoute(
+        path: '/prediction',
+        builder: (context, state) => const PredictionScreen(),
+      ),
+    ],
+  );
+});
+
+void main() {
+  runApp(const ProviderScope(child: MyApp()));
+}
+
+class MyApp extends ConsumerWidget {
+  const MyApp({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final router = ref.watch(routerProvider);
+    return MaterialApp.router(
+      routerConfig: router,
+      theme: ThemeData(
+        fontFamily: 'Inter',
+        primarySwatch: Colors.blue,
+      ),
+    );
+  }
+}
+
+class AuthScreen extends HookConsumerWidget {
+  const AuthScreen({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final emailController = useTextEditingController();
+    final passwordController = useTextEditingController();
+    final isLoading = useState(false);
+
+    Future<void> handleAuth(String type) async {
+      if (emailController.text.isEmpty || passwordController.text.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Please fill in all fields')),
+        );
+        return;
+      }
+
+      isLoading.value = true;
+      try {
+        final response = await http.post(
+          Uri.parse('https://r0c8kgwocscg8gsokogwwsw4.zetaverse.one/db'),
+          headers: {
+            'Authorization': 'Bearer ZgwQPsvoZqdTFfu5xF19Nw3wTOY2',
+            'Content-Type': 'application/json',
+          },
+          body: jsonEncode({
+            'action': type == 'login' ? 'read' : 'create',
+            'table': 'users',
+            'appSlug': 'home-price-predictor',
+            'userId': emailController.text,
+            'data': {'password': passwordController.text},
+          }),
+        );
+
+        final data = jsonDecode(response.body);
+        if (type == 'login' && (data['data'] as List).isEmpty) {
+          throw Exception('User not found or incorrect password');
+        }
+
+        ref.read(authStateProvider.notifier).setUserId(emailController.text);
+        await SharedPreferences.getInstance()
+          ..setString('userId', emailController.text);
+      } catch (e) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(e.toString())),
+        );
+      }
+      isLoading.value = false;
+    }
+
+    return Scaffold(
+      body: Center(
+        child: Card(
+          margin: const EdgeInsets.all(16),
+          child: Padding(
+            padding: const EdgeInsets.all(24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text(
+                  'Welcome to HomePrice Predictor',
+                  style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
+                ),
+                const SizedBox(height: 16),
+                TextField(
+                  controller: emailController,
+                  decoration: const InputDecoration(labelText: 'Email'),
+                ),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: passwordController,
+                  decoration: const InputDecoration(labelText: 'Password'),
+                  obscureText: true,
+                ),
+                const SizedBox(height: 16),
+                ElevatedButton(
+                  onPressed: isLoading.value ? null : () => handleAuth('login'),
+                  child: const Text('Sign In'),
+                ),
+                TextButton(
+                  onPressed: isLoading.value ? null : () => handleAuth('signup'),
+                  child: const Text('Create Account'),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class PredictionScreen extends HookConsumerWidget {
+  const PredictionScreen({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final houseSizeController = useTextEditingController();
+    final bedroomsController = useTextEditingController();
+    final locationController = useTextEditingController();
+    final furnishedState = useState('fully');
+    final prediction = useState<String?>(null);
+    final isLoading = useState(false);
+
+    Future<void> predictPrice() async {
+      if (houseSizeController.text.isEmpty ||
+          bedroomsController.text.isEmpty ||
+          locationController.text.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Please fill in all fields')),
+        );
+        return;
+      }
+
+      isLoading.value = true;
+      try {
+        final response = await http.post(
+          Uri.parse('https://r0c8kgwocscg8gsokogwwsw4.zetaverse.one/ai'),
+          headers: {
+            'Authorization': 'Bearer ZgwQPsvoZqdTFfu5xF19Nw3wTOY2',
+            'Content-Type': 'application/json',
+          },
+          body: jsonEncode({
+            'messages': [
+              {
+                'role': 'user',
+                'content': [
+                  {
+                    'type': 'text',
+                    'text':
+                        'Predict the house price for a ${houseSizeController.text} sq ft house with ${bedroomsController.text} bedrooms in ${locationController.text}, ${furnishedState.value} furnished. Give the answer in USD with a range.',
+                  }
+                ]
+              }
+            ]
+          }),
+        );
+
+        final data = jsonDecode(response.body);
+        prediction.value = data['message'];
+
+        // Save prediction
+        await http.post(
+          Uri.parse('https://r0c8kgwocscg8gsokogwwsw4.zetaverse.one/db'),
+          headers: {
+            'Authorization': 'Bearer ZgwQPsvoZqdTFfu5xF19Nw3wTOY2',
+            'Content-Type': 'application/json',
+          },
+          body: jsonEncode({
+            'action': 'create',
+            'table': 'predictions',
+            'appSlug': 'home-price-predictor',
+            'userId': ref.read(authStateProvider),
+            'data': {
+              'houseSize': houseSizeController.text,
+              'bedrooms': bedroomsController.text,
+              'location': locationController.text,
+              'furnished': furnishedState.value,
+              'prediction': prediction.value,
+            },
+          }),
+        );
+      } catch (e) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(e.toString())),
+        );
+      }
+      isLoading.value = false;
+    }
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('HomePrice Predictor'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.logout),
+            onPressed: () {
+              ref.read(authStateProvider.notifier).setUserId(null);
+              SharedPreferences.getInstance().then((prefs) => prefs.remove('userId'));
+            },
+          ),
+        ],
+      ),
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            TextField(
+              controller: houseSizeController,
+              decoration: const InputDecoration(labelText: 'House Size (sq ft)'),
+              keyboardType: TextInputType.number,
+            ),
+            const SizedBox(height: 16),
+            TextField(
+              controller: bedroomsController,
+              decoration: const InputDecoration(labelText: 'Number of Bedrooms'),
+              keyboardType: TextInputType.number,
+            ),
+            const SizedBox(height: 16),
+            TextField(
+              controller: locationController,
+              decoration: const InputDecoration(labelText: 'Location'),
+            ),
+            const SizedBox(height: 16),
+            DropdownButtonFormField<String>(
+              value: furnishedState.value,
+              decoration: const InputDecoration(labelText: 'Furnished State'),
+              items: const [
+                DropdownMenuItem(value: 'fully', child: Text('Fully Furnished')),
+                DropdownMenuItem(value: 'semi', child: Text('Semi Furnished')),
+                DropdownMenuItem(
+                    value: 'unfurnished', child: Text('Unfurnished')),
+              ],
+              onChanged: (value) => furnishedState.value = value!,
+            ),
+            const SizedBox(height: 24),
+            ElevatedButton(
+              onPressed: isLoading.value ? null : predictPrice,
+              child: const Text('Predict Price'),
+            ),
+            if (prediction.value != null) ...[
+              const SizedBox(height: 24),
+              const Text(
+                'Predicted Price Range',
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                prediction.value!,
+                style: const TextStyle(
+                  fontSize: 24,
+                  color: Colors.blue,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
